@@ -10,8 +10,15 @@ name: Build x86_64 OpenWrt
 
 on:
   workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
   schedule:
     - cron: 0 18 * * *
+    
+
 #  watch:
 #    types: started
 
@@ -23,6 +30,8 @@ env:
   WEBROOT: /data/dnmp/www/openwrt.cc
   UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
+  UPLOAD_COWTRANSFER: true
+  UPLOAD_WETRANSFER: true
 
 jobs:
   Build:
@@ -93,6 +102,13 @@ jobs:
           ../scripts/preset-terminal-tools.sh
           make defconfig
 
+      - name: SSH connection to Actions
+        uses: P3TERX/ssh2actions@v1.0.0
+        if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
       - name: Cache DL Packages
         uses: actions/cache@v2
         id: cache
@@ -115,7 +131,21 @@ jobs:
           cd $OPENWRTROOT
           echo -e "$(nproc) thread compile"
           make tools/compile -j$(nproc) || make tools/compile -j1 V=s
-
+          
+      - name: SSH connection to Actions
+        uses: P3TERX/ssh2actions@v1.0.0
+        if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          
+      - name: Compile Tools
+        id: tools2
+        run: |
+          cd $OPENWRTROOT
+          echo -e "$(nproc) thread compile"
+          make tools/compile -j$(nproc) || make tools/compile -j1 V=s        
+          
       - name: Compile Packages
         id: packages
         run: |
@@ -252,6 +282,38 @@ jobs:
           rm -rf packages
           df -hT $PWD
           echo "::set-output name=ORGANIZE_STATUS::success"
+
+      - name: Upload firmware directory
+        uses: actions/upload-artifact@main
+        if: env.GENERATE_STATUS == 'success' && !cancelled()
+        with:
+          name: OpenWrt_firmware${{ env.TARGET }}${{ env.SUBTARGET }}
+          path: "openwrt/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/"
+      - name: Upload firmware to cowtransfer
+        id: cowtransfer
+        if: env.GENERATE_STATUS == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
+          echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
+          echo "::set-output name=url::$(cat cowtransfer.log | grep https | cut -f3 -d" ")"
+      - name: Upload firmware to WeTransfer
+        id: wetransfer
+        if: env.GENERATE_STATUS == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
+          echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
+          echo "::set-output name=url::$(cat wetransfer.log | grep https | cut -f3 -d" ")"
+      - name: Generate release tag
+        id: tag
+        run: |
+          echo "::set-output name=release_tag::$(date +"%Y.%m.%d-%H%M")"
+          touch release.txt
+          [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
+          [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
+          echo "::set-output name=status::success"
+
 
       - name: Deploy Files To Release
         id: release
